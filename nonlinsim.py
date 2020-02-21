@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from scipy.special import erf as erf
 
-# Sorry style snobs, these are physical constants... they're gonna be lobals
+# These are physical constants... they're gonna be globals
 constants = {"mu_o": 1,
              "eps_o": 1}
 
@@ -81,7 +81,7 @@ def funcsum(func1, func2):
 
     return v_IN
     
-def simulate(v_IN, sim_params = sim_params, params = params):
+def simulate(v_IN, sim_params, params):
     length = params["length"]
     duration = params["duration"]
 
@@ -196,7 +196,7 @@ def simulate(v_IN, sim_params = sim_params, params = params):
             dv, di = grad_cap(v[n-1] - v[n], i[n] - i[n+1])  # check gradient limits
 
             # first do routine calculations, will overwrite if needed
-            newi.append(dt/mus/dx*dv + i[n])
+            newi.append(dt/mus/dx*dv + i[n])  # note dv is defined backwards
             newv.append(dt/dx/eps*di + v[n])
 
             if hotspot[n] == False:
@@ -232,7 +232,7 @@ def simulate(v_IN, sim_params = sim_params, params = params):
             # kludge Rload + .01 to avoid problem when term is shorted.
 
             # I've been having troubles when very large gradients are present.
-            dv, di = grad_def(v[-2] - v[-1], i[-1] - v[-1]/(Rload + .01))
+            dv, di = grad_cap(v[-2] - v[-1], i[-1] - v[-1]/(Rload + .01))
             newv.append(v[-1] + di * dt / eps / dx)
             newi.append(dv * dt/mus/dx + i[-1])
             
@@ -424,8 +424,6 @@ if __name__ == '__main__':
                         help = 'initial DC bias current as fraction of ic')
     parser.add_argument('--adaptt', action = 'store_true',
                         help = 'adaptive timestep mode')
-    parser.add_argument('--adaptt', action = 'store_true',
-                        help = 'adaptive timestep mode')
     parser.add_argument('--nrgmin', default = 1e-9, type = float,
                         help = 'minimum fractional energy change per timestep')
     parser.add_argument('--nrgmax', default = 1e-9, type = float,
@@ -447,7 +445,7 @@ if __name__ == '__main__':
               "ic": args.ic,
               "ihs": args.ihs,
               "hotspot_location": args.hsloc,
-              "bias": args.bias
+              "bias": args.bias,
               "length": args.length,
               "duration": args.duration
     }
@@ -499,7 +497,7 @@ if __name__ == '__main__':
         plt.ticklabel_format(axis='y',style='sci',scilimits=(-2,2))
         plt.legend()
 
-         plt.subplot(2,1,2)
+        plt.subplot(2,1,2)
         for frame in frames_out:
             plt.plot(xpoints,frame[2])
         plt.xlabel('pos')

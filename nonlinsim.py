@@ -31,8 +31,8 @@ import matplotlib.animation as animation
 from scipy.special import erf as erf
 
 # These are physical constants... they're gonna be globals
-constants = {"mu_o": 1,
-             "eps_o": 1}
+constants = {"mu_o": 1.26e-7,
+             "eps_o": 8.85e-12}
 
 """
 Create some helper functions, to make it easier to create some generic
@@ -58,7 +58,7 @@ def sinusoid(amplitude, frequency, phase = 0, offset = 0):
 
     return v_IN
 
-def step(amplitude, time, width, offset):
+def step(amplitude, time, width, offset = 0):
     """
     generic sigmoid function
     """
@@ -157,18 +157,6 @@ def simulate(v_IN, sim_params, params):
         boundary conditions.
         """
         
-        def grad_cap(dv, di):
-            """ 
-            helper function to cap gradient
-
-            I'm not sure what this will do to energy conservation. 
-            """
-            #if np.abs(dv) > dv_cap:
-            #dv = np.sign(dv)*dv_cap
-            #if np.abs(di) > di_cap:
-            #di = np.sign(di)*di_cap
-            return dv, di
-        
         newi = []  # i(t+dt)
         newv = []  # v(t+dt)
         newhotspot = hotspot[:]
@@ -183,22 +171,47 @@ def simulate(v_IN, sim_params, params):
             # The Vin-v[0] term can be very large... this could cause problems
             dv = Vin - v[0]
 
-            dv, di = grad_cap(Vin - v[0] - i[0] * RIN, i[0] - i[1])
-               
+            """
+                          v0    
+            o--RIN--o--L--o--L-- . . .
+            |         ->  |  ->
+            Vin       i0  C  i1
+            |             |
+            g             g
+
+            """
+            dv, di = Vin - v[0] - i[0] * RIN, i[0] - i[1]
+            
             newi.append(dt / mus / dx * dv + i[0])
-            newv.append(dt/dx/eps*di + v[0])
+            newv.append(dt / dx /eps * di + v[0])
 
         # deal with body of array
         
         for n in range(1,len(i)-1):  # iterate through points, avoiding endpoints
             mus = mu_eff(i[n])
+            """
+                 -> iR
+         . . . o--R--o--R--o . . .
+               |     |     |
+         v(n-1)|     |vn   | 
+         . . . o--L--o--L--o . . .
+                 ->  |  ->
+                 in  C  i(n+1)
+                     |
+                     g
 
-            dv, di = grad_cap(v[n-1] - v[n], i[n] - i[n+1])  # check gradient limits
+            """
+            dv = v[n-1] - v[n]  # calculate dv
 
+            # calculate resistivity so that cutoff frequency will be as specified
+            
+            iR = -dv / (sim_params["rho"] * dx)  # current in resistor
+            di = i[n] + iR - i[n+1]  # current in capacitor
+           
             # first do routine calculations, will overwrite if needed
-            newi.append(dt/mus/dx*dv + i[n])  # note dv is defined backwards
+            newi.append(dt/mus/dx*dv + i[n])
             newv.append(dt/dx/eps*di + v[n])
-
+            
             if hotspot[n] == False:
                 # spot is not hot yet, check if it needs to switch
                 if abs(newi[n]) > params["ic"]*icnormd[n]:
@@ -217,9 +230,6 @@ def simulate(v_IN, sim_params, params):
                    (np.sign(new_dv) != np.sign(old_dv)):
                     # heal hotspot
                     newhotspot[n] = False
-                    if args.debug:
-                        print("hotspot healed")
-                        pass
                 else:
                     # not healed, overwrite previous calc and preserve
                     # current (i.e. i_HS).
@@ -231,10 +241,24 @@ def simulate(v_IN, sim_params, params):
             # tried on Jan 14 2020 to improve this termination condition
             # kludge Rload + .01 to avoid problem when term is shorted.
 
+            """
+                 -> iR
+         . . . o--R--o    
+               |     |     
+          v[-2]|     |v[-1]    
+         . . . o--L--o-----o
+                 ->  |     |
+               i[-1] C     Rl
+                     |     |
+                     g     g
+
+            """
             # I've been having troubles when very large gradients are present.
-            dv, di = grad_cap(v[-2] - v[-1], i[-1] - v[-1]/(Rload + .01))
+            dv = v[-2] - v[-1]
+            iR = - dv / (sim_params["rho"]*dx)
+            di = i[-1] + iR - v[-1]/(Rload + .01)
             newv.append(v[-1] + di * dt / eps / dx)
-            newi.append(dv * dt/mus/dx + i[-1])
+            newi.append(dv * dt / mus / dx + i[-1])
             
         return newi, newv, newhotspot
     
@@ -258,19 +282,24 @@ def simulate(v_IN, sim_params, params):
         """
         calculate power dissipated at inputs and outputs and in hotspot
         """
-        if True in hotspot:
+        if True in hotspot:  # hotspot power
             hsndx = hotspot.index(True)
             hspower = - (v[hsndx]-v[hsndx-1])*i[hsndx]
         else:
             hspower = 0
 
-        if params["RL"] != 0 :
+        if params["RL"] != 0 :  # load resistor power
             term_power = v[-1]**2/params["RL"]
         else:
             term_power = 0
+
+        loss = 0
+        for n in range(1,len(i)):
+            loss += (v[n] - v[n-1])**2/(sim_params["rho"]*dx)
             
         return -i[0]*Vin + \
             params["RIN"]*i[0]**2 + \
+            loss + \
             term_power + \
             hspower
 
@@ -287,22 +316,12 @@ def simulate(v_IN, sim_params, params):
         left_boundary["source strength"] = v_IN(t)
         valid_step = False
         energy_before_step = energy(i, v, hotspot)
-        if args.debug :
-            print(f"energy before step: {energy_before_step:.3}")
-            pass
         
         power_during_step = power(left_boundary["source strength"],
                                   i,
                                   v,
                                   hotspot)
-        if args.debug :
-            print(f"power during step: {power_during_step:.3}")
-            pass
         while (valid_step != True):
-            if args.debug :
-                #print(f"t = {t:.4}, duration = {duration:.4}, dt = {dt}")
-                assert dt > 1e-10, "dt got too small"
-                pass
             
             # Where simulation occurs
             temp_i,temp_v,temp_hotspot  = timestep(i,
@@ -428,12 +447,18 @@ if __name__ == '__main__':
                         help = 'minimum fractional energy change per timestep')
     parser.add_argument('--nrgmax', default = 1e-9, type = float,
                         help = 'maximum fractional energy change per timestep')
+    parser.add_argument('--fcut', default = 40e9, type = float,
+                        help = 'maximum frequency in transmission line')
     
     args = parser.parse_args()
     if args.Rin == 'match':
         args.Rin = np.sqrt(args.mur*constants['mu_o']/args.epsr/constants['eps_o'])
+        if args.debug:
+            print(f"Rin calculated to be {args.Rin}")
     if args.Rload == 'match':
         args.Rload = np.sqrt(args.mur*constants['mu_o']/args.epsr/constants['eps_o'])
+        if args.debug:
+            print(f"Rload calculated to be {args.Rload}")
 
     # for parameters that are about the physical system primarily
     params = {"mu_r": args.mur,
@@ -480,7 +505,10 @@ if __name__ == '__main__':
                   "Vretrap": args.ihs*args.Rsheet*.1,
                   "dv_cap": args.dx*1e6,  # set max grad 1 MV/m
                   "di_cap": args.dx*1e6,  # just guessing for current grad
+                  "fcut": args.fcut
                   }
+    sim_params["rho"] = 2*np.pi*constants["mu_o"]*params["mu_r"]*sim_params["fcut"]
+
 
 
     frames_out,detailed_balance  = simulate(sourcelist[args.source],

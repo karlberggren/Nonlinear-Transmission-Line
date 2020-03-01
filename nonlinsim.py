@@ -1,4 +1,5 @@
-"""Nonlinsim
+"""
+Nonlinsim
 
 Has fully featured CLI with help.  General advice is timestep should
 be much finer than position step (in units where c = 1).
@@ -21,7 +22,7 @@ system is less than a fixed fraction of the total energy (say .1%)
 then keep that timestep, but set next timestep to be 2x current
 timestep.
 
-(1) Add current time to output.
+FIXME refactor out Vretrap and replace with a Rmin
 
 """
 
@@ -31,16 +32,107 @@ import matplotlib.animation as animation
 from scipy.special import erf as erf
 from scipy import constants
 
-# These are physical constants... they're gonna be globals
+# These are physical constants... they're gonna be globals.  Sorry.
 c = constants.speed_of_light
 Zo = np.sqrt(constants.mu_0/constants.epsilon_0)
+
+"""
+Hotspot class
+
+
+"""
+class Hotspot:
+    # some class attributes that will be accessed as constants
+    psi = 38
+    vo = 250 / c  # m/s
+    f = 0.1
+
+    # some class attributes that will be used by simulation, effectively as globals, but protected in class
+    active = set()  # set of all active hotspots
+    archive = set()  # set of all past hotspots
+    
+    def __init__(self, t_o, ndx, params,sim_params):
+        self.index = ndx
+        self.t_o = t_o
+        self.hotspot_age = 0.0
+        self.Rs = params['Rsheet']
+        self.res = self.f * self.Rs
+        self.width = params['width']
+        self.V_retrap = sim_params['V_retrap']  # FIXME refactor
+        """
+        the history vector is the main way we will keep track of the state of the hotspot.
+        each tuple will track current time, resistance, and power dissipated in previous timestep
+        """
+        self.history = np.array([(self.hotspot_age, self.res, 0)])
+        Hotspot.active.add(self)
+        return
+
+    def step(self, i, dt):
+        """
+        update hotspot state by a time step of duration dt
+        
+        return True if hotspot has not collapsed
+        return False if hotspot has collapsed
+
+        """
+
+        i = i / isw
+        vhs = 2*vo*(psi*i**2 - 2) / np.sqrt(psi*i**2 -1)
+        oldres = self.res
+        self.res += vhs * dt * self.Rs / self.width
+        self.hotspot_age += dt
+
+        # power dissipated, use average of resistance between timesteps
+        dp = i**2 * i_sw**2 * (oldres + self.res)/2.0
+        
+        if self.res <= self.V_retrap / (np.abs(i)*isw):  # hotspot collapsed?
+            Hotspot.active.remove(self)
+            Hotspot.archive.add(self)
+        else:
+            np.append(self.R_history, (self.hotspot_age, self.res, dp))
+        return
+
+
+    def delete_timestep(self):
+        """
+        delete last timestep (used in adaptive timestepping)
+        """
+        self.history = self.history[:-1]
+        self.res = self.history[-1][2]
+        self.hotspot_age = self.history[0]
+        return
+    
+    """
+    active_hotspot indices
+
+    helper to generate list of indices of active hotspots
+    """
+    @staticmethod
+    def active_hotspot_indices():
+        indices = []
+        for hotspot in Hotspot.active():
+            indices.append(hotspot.index)
+        return indices
+
+    """
+    get_hotspot
+
+    helper to return hotspot at a given index, or return 'default' (False) if no
+    hotspot exists at that index
+    """
+    @staticmethod
+    def get_hotspot(ndx, default = False):
+        for hotspot in Hotspot.active():
+            if hotspot.index == ndx:
+                return hotspot
+        return default
+            
 
 """
 Create some helper functions, to make it easier to create some generic
 inputs.  Of course, user can always make themselves a custom function
 to pass as input.
 """
-
 def gaussian(amplitude, t_offset, sigma, offset = 0):
     """
     generic gaussian function, for creating gaussian input pulse
@@ -82,6 +174,16 @@ def funcsum(func1, func2):
 
     return v_IN
     
+"""
+simulate
+
+:: v_IN :: main input function of time
+:: sim_params :: dict of simulation relevant parameters
+:: params :: dict of physically relevant parameters
+
+perform simulation over duration etc. as specified in parameter dictionaries
+
+"""
 def simulate(v_IN, sim_params, params):
     length = params["length"]
     duration = params["duration"]
@@ -138,25 +240,24 @@ def simulate(v_IN, sim_params, params):
     if 1.0 >= params["hotspot_location"] >= 0 :
         icnormd[int(params["hotspot_location"] * numpoints)] = 0.8 
 
-    # initialize system with no hotspots
-    
-    hotspot = [False for _ in range(numpoints)]
-    
     """
     Now we'll iterate through the timesteps.
 
     First a helper function for that.
     """
 
-    def timestep(i, v, hotspot, left_boundary, right_boundary, dt):
+    def timestep(i, v, left_boundary, right_boundary, dt):
         """
-        move i,v vector forward from time t to time t+dt, taking care of
+        move i,v vectors forward from time t to time t+dt, taking care of
         boundary conditions.
+
+        update any hotspots
+
+        return updated i, v
         """
         
         newi = []  # i(t+dt)
         newv = []  # v(t+dt)
-        newhotspot = hotspot[:]  # FIXME probably slow
         
         eps = params["eps_r"]
 
@@ -165,6 +266,7 @@ def simulate(v_IN, sim_params, params):
             mus = mu_eff(i[0])
             Vin = left_boundary['source strength']
             RIN = left_boundary['source impedance']
+
             # The Vin-v[0] term can be very large... this could cause problems
             dv = Vin - v[0]
 
@@ -212,32 +314,34 @@ def simulate(v_IN, sim_params, params):
             newi.append(dt/mus/dx*dv + i[n])
             newv.append(dt/dx/eps*di + v[n])
             
-            if hotspot[n] == False:
-                # spot is not hot yet, check if it needs to switch
-                if abs(newi[n]) > params["ic"]*icnormd[n]:
-                    newhotspot[n] = True
-                    """
-                    Model of a hotspot is a current source replacing the inductor,
-                    pointing in direction current was already directed
-                    """
-                    newi[n] = np.sign(newi[n])*params["ihs"]
-                    hotspot_timer = 0
+            # check if a hotspot needs to be created
+            if abs(newi[n]) > params["ic"]*icnormd[n]:
+                # switching current exceeded
+                if n not in Hotspot.active_hotspot_indices():
+                    # hotspot didn't exist at this location previously, create it
+                    Hotspot(t, n, params, sim_params)
             else:
-                # at a hotspot, check for healing
-                old_dv = v[n] - v[n-1]
-                new_dv = newv[n] - newv[n-1]
-                # healed if voltage has dropped below Vretrap
-                if (abs(new_dv) < sim_params["Vretrap"]) or \
-                   (np.sign(new_dv) != np.sign(old_dv)):
-                    # heal hotspot
-                    newhotspot[n] = False
-                    hotspot_timer = None
-                else:
-                    # not healed, overwrite previous calc and preserve
-                    # current (i.e. i_HS).
-                    hotspot_timer += dt
-                    newi[n] = i[n]
-                    
+                # check if there's a hotspot here already
+                hotspot = Hotspot.get_hotspot(n):
+                if hotspot:
+                    Rhs = hotspot.res
+                    """
+
+                 v(n-1)            v(n)
+                 . . . o--L---Rhs--o
+                         ->        |
+                         in        C
+                                   |
+                                   g
+
+                    """
+                    dv = v[n-1] - (v[n] +  i[n] * Rhs)  # voltage across inductor
+                    di = i[n] - i[n+1]  # current in capacitor
+
+                    newi.append(dt/mus/dx*dv + i[n])
+                    newv.append(dt/dx/eps*di + v[n])
+                    hotspot.step(i[n],dt) == 0
+
         # deal with right boundary
         if right_boundary['type'] == 'load':
             Rload = right_boundary['load impedance']
@@ -266,10 +370,10 @@ def simulate(v_IN, sim_params, params):
             newv.append(v[-1] + di * dt / eps / dx)
             newi.append(dv * dt / mus / dx + i[-1])
             
-        return newi, newv, newhotspot
+        return newi, newv
     
 
-    def energy(i,v,hotspot) :
+    def energy(i,v) :
         """
         calculate total energy stored in transmission line
         """
@@ -279,42 +383,42 @@ def simulate(v_IN, sim_params, params):
         α = params["alpha"]
         β = params["beta"]
         for n,io in enumerate(i):
-            # sum all inductors not hotspots
-            if not hotspot[n]:
-                nrg += Lo * (0.5*io**2 +
-                             2/3*α*io**3 +
-                             1/4*α*io**4 +
-                             β*io**5)
-            # hotspot only replaces inductor, not cap
+            # sum all inductors
+            nrg += Lo * (0.5*io**2 +
+                         2/3*α*io**3 +
+                         1/4*α*io**4 +
+                         β*io**5)
             nrg += 0.5 * Co * v[n]**2
         return nrg
 
-    def power(Vin, i, v, hotspot) :
+    def power(Vin, i, v):
         """
         calculate power dissipated at inputs and outputs and in hotspot
         """
-        if True in hotspot:  # hotspot power
-            hsndx = hotspot.index(True)
-            hspower = - (v[hsndx]-v[hsndx-1])*i[hsndx]
-        else:
-            hspower = 0
+        hspower = 0
+        for hotspot in Hotspot.active:  # hotspots first
+            hspower += hotspot.history[-1][2]
 
         if params["RL"] != 0 :  # load resistor power
             term_power = v[-1]**2/params["RL"]
         else:
             term_power = 0
 
-        loss = 0
         Rloss = sim_params["rho"]*dx
+        hs_indices = Hotspot.active_hotspot_indices()
         if Rloss != 0:
-            for n in range(1,len(i)):
-                loss += (v[n] - v[n-1])**2 / Rloss
+            for n in range(1,len(i)):  # don't count first node, no loss resistor there
+                if n not in hs_indices:  # don't count hotspots, no loss resistor in them
+                    loss += (v[n] - v[n-1])**2 / Rloss
+        else:
+            loss = 0
+                    
             
         return -i[0]*Vin + \
             params["RIN"]*i[0]**2 + \
             loss + \
             term_power + \
-            hspower  # lost in hotspot
+            hspower
 
     left_boundary = {}
     right_boundary = {}
@@ -325,29 +429,30 @@ def simulate(v_IN, sim_params, params):
 
     detailed_balance = []
 
+    """
+    Central simulation loop
+    """
     while t < duration:
         left_boundary["source strength"] = v_IN(t)
         valid_step = False
-        energy_before_step = energy(i, v, hotspot)
+        energy_before_step = energy(i, v)
         
         power_during_step = power(left_boundary["source strength"],
                                   i,
-                                  v,
-                                  hotspot)
+                                  v)
         while (valid_step != True):
             if args.debug :
                 #print(f"Time is {t}")
                 pass
             
             # Where simulation occurs
-            temp_i,temp_v,temp_hotspot  = timestep(i,
-                                                   v,
-                                                   hotspot,
-                                                   left_boundary,
-                                                   right_boundary,
-                                                   dt)
+            temp_i,temp_v  = timestep(i,
+                                      v,
+                                      left_boundary,
+                                      right_boundary,
+                                      dt)
 
-            energy_after_step = energy(temp_i, temp_v, temp_hotspot)
+            energy_after_step = energy(temp_i, temp_v)
 
             step_nrg_gain = power_during_step*dt + \
                             energy_after_step - \
@@ -360,19 +465,16 @@ def simulate(v_IN, sim_params, params):
             """
             need to check np.abs(energy_after_step) > 0 so we don't get 
             divide by zero error some weird thing with low energy cases. 
-            Also need to make sure a brand new hotspot wasn't just created 
-            (energy isn't conserved by construction across a hotspot 
-            creation event).
             """
-            # 1 hotspot now, but wasn't last round
-            new_hotspot = bool(sum(temp_hotspot) - sum(hotspot))
-
-            # hotspot breaks nrg conservation
-            if sim_params["adaptive_time"] and new_hotspot == False:
+            if sim_params["adaptive_time"]:
                 if np.abs(energy_after_step) > 1e-25 and \
                    np.abs(step_nrg_gain/energy_after_step) > nrg_gain_max:
                     # moving too quickly
                     valid_step = False
+                    # back up hotspot
+                    for hotspot in Hotspot.active:
+                        hotspot.delete_timestep()
+
                     dt = dt/2
                     if args.verbose :
                         print(f"Energy change too large, dt = {dt:.3}")
@@ -380,7 +482,6 @@ def simulate(v_IN, sim_params, params):
                 valid_step = True
                 i = temp_i
                 v = temp_v
-                hotspot = temp_hotspot
                 t += dt
                 frame_timer += dt
                 if sim_params["adaptive_time"] and \
@@ -483,7 +584,8 @@ if __name__ == '__main__':
               "bias": args.bias,
               "length": 1., # always use length 1, and normalize
               # convert duration to sim units by * c/L
-              "duration": args.duration * c / args.length
+              "duration": args.duration * c / args.length,
+              "Rsheet": args.Rsheet / Zo
     }
 
     sourcelist = {'gaussian': gaussian(args.amplitude,

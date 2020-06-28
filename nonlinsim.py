@@ -32,7 +32,8 @@ import matplotlib.animation as animation
 from scipy.special import erf as erf
 from scipy import constants
 
-# These are physical constants... they're gonna be globals.  Sorry.
+# These are physical constants... they're gonna be globals.
+
 c = constants.speed_of_light
 Zo = np.sqrt(constants.mu_0/constants.epsilon_0)
 
@@ -47,24 +48,32 @@ class Hotspot:
     vo = 250 / c  # m/s
     f = 0.1
 
-    # some class attributes that will be used by simulation, effectively as globals, but protected in class
-    active = set()  # set of all active hotspots
+    # some class attributes that will be used by simulation,
+    # effectively as globals, but protected in class
+    active_hs = set()  # set of all active hotspots
     archive = set()  # set of all past hotspots
     
     def __init__(self, t_o, ndx, params,sim_params):
+        """
+        t_o start time (FIXME?)
+        ndx:: index
+        params:: parameters defining physical systems
+        sim_params:: simulation parameters
+        """
         self.index = ndx
         self.t_o = t_o
         self.hotspot_age = 0.0
         self.Rs = params['Rsheet']
         self.res = self.f * self.Rs
         self.width = params['width']
-        self.V_retrap = sim_params['V_retrap']  # FIXME refactor
+        self.V_retrap = sim_params['Vretrap']  # FIXME refactor
+        self.isw = params['ic']
         """
         the history vector is the main way we will keep track of the state of the hotspot.
         each tuple will track current time, resistance, and power dissipated in previous timestep
         """
         self.history = np.array([(self.hotspot_age, self.res, 0)])
-        Hotspot.active.add(self)
+        Hotspot.active_hs.add(self)
         return
 
     def step(self, i, dt):
@@ -76,20 +85,20 @@ class Hotspot:
 
         """
 
-        i = i / isw
-        vhs = 2*vo*(psi*i**2 - 2) / np.sqrt(psi*i**2 -1)
+        i = i / self.isw
+        vhs = 2*self.vo*(self.psi*i**2 - 2) / np.sqrt(self.psi*i**2 -1)
         oldres = self.res
         self.res += vhs * dt * self.Rs / self.width
         self.hotspot_age += dt
 
         # power dissipated, use average of resistance between timesteps
-        dp = i**2 * i_sw**2 * (oldres + self.res)/2.0
+        dp = i**2 *self.isw**2 * (oldres + self.res)/2.0
         
-        if self.res <= self.V_retrap / (np.abs(i)*isw):  # hotspot collapsed?
-            Hotspot.active.remove(self)
+        if self.res <= self.V_retrap / (np.abs(i)*self.isw):  # hotspot collapsed?
+            Hotspot.active_hg.remove(self)
             Hotspot.archive.add(self)
         else:
-            np.append(self.R_history, (self.hotspot_age, self.res, dp))
+            np.append(self.history, (self.hotspot_age, self.res, dp))
         return
 
 
@@ -110,7 +119,7 @@ class Hotspot:
     @staticmethod
     def active_hotspot_indices():
         indices = []
-        for hotspot in Hotspot.active():
+        for hotspot in Hotspot.active_hs:
             indices.append(hotspot.index)
         return indices
 
@@ -122,7 +131,7 @@ class Hotspot:
     """
     @staticmethod
     def get_hotspot(ndx, default = False):
-        for hotspot in Hotspot.active():
+        for hotspot in Hotspot.active_hs:
             if hotspot.index == ndx:
                 return hotspot
         return default
@@ -138,7 +147,7 @@ def gaussian(amplitude, t_offset, sigma, offset = 0):
     generic gaussian function, for creating gaussian input pulse
     """
     def v_IN(t):
-        return amplitude * np.exp(-(t-center)**2/(2*sigma**2)) + offset
+        return amplitude * np.exp(-(t-t_offset)**2/(2*sigma**2)) + offset
 
     return v_IN
 
@@ -315,14 +324,20 @@ def simulate(v_IN, sim_params, params):
             newv.append(dt/dx/eps*di + v[n])
             
             # check if a hotspot needs to be created
+
             if abs(newi[n]) > params["ic"]*icnormd[n]:
+                if args.verbose:
+                    print(f"Hotspot detected at n = {n}, newi is {newi[n]:.3}")
+                    raise Exception()
+                    pass
+                
                 # switching current exceeded
                 if n not in Hotspot.active_hotspot_indices():
                     # hotspot didn't exist at this location previously, create it
                     Hotspot(t, n, params, sim_params)
             else:
                 # check if there's a hotspot here already
-                hotspot = Hotspot.get_hotspot(n):
+                hotspot = Hotspot.get_hotspot(n)
                 if hotspot:
                     Rhs = hotspot.res
                     """
@@ -338,8 +353,8 @@ def simulate(v_IN, sim_params, params):
                     dv = v[n-1] - (v[n] +  i[n] * Rhs)  # voltage across inductor
                     di = i[n] - i[n+1]  # current in capacitor
 
-                    newi.append(dt/mus/dx*dv + i[n])
-                    newv.append(dt/dx/eps*di + v[n])
+                    newi[-1] = dt/mus/dx*dv + i[n]
+                    newv[-1] = dt/dx/eps*di + v[n]
                     hotspot.step(i[n],dt) == 0
 
         # deal with right boundary
@@ -373,7 +388,7 @@ def simulate(v_IN, sim_params, params):
         return newi, newv
     
 
-    def energy(i,v) :
+    def old_energy(i,v) :
         """
         calculate total energy stored in transmission line
         """
@@ -382,6 +397,7 @@ def simulate(v_IN, sim_params, params):
         Lo = params["mu_r"] * dx
         α = params["alpha"]
         β = params["beta"]
+        # identified as key source of slow-down, so use numpy
         for n,io in enumerate(i):
             # sum all inductors
             nrg += Lo * (0.5*io**2 +
@@ -391,12 +407,32 @@ def simulate(v_IN, sim_params, params):
             nrg += 0.5 * Co * v[n]**2
         return nrg
 
+    def energy(i,v):
+        """
+        faster version of
+        calculate total energy stored in transmission line
+        """
+        i,v = np.array(i),np.array(v)
+        Co = params["eps_r"] * dx
+        nrg = 0
+        Lo = params["mu_r"] * dx
+        α = params["alpha"]
+        β = params["beta"]
+        # identified as key source of slow-down, so use numpy
+        node_i_nrg = Lo * (0.5*i**2 +
+                           2/3*α*i**3 +
+                           1/4*α*i**4 +
+                           β*i**5)
+        node_v_nrg = 0.5 * Co * v**2
+
+        return np.sum(node_i_nrg + node_v_nrg)
+
     def power(Vin, i, v):
         """
         calculate power dissipated at inputs and outputs and in hotspot
         """
         hspower = 0
-        for hotspot in Hotspot.active:  # hotspots first
+        for hotspot in Hotspot.active_hs:  # hotspots first
             hspower += hotspot.history[-1][2]
 
         if params["RL"] != 0 :  # load resistor power
@@ -433,8 +469,9 @@ def simulate(v_IN, sim_params, params):
     Central simulation loop
     """
     while t < duration:
+        # print(t)
         left_boundary["source strength"] = v_IN(t)
-        valid_step = False
+        valid_step = False  # used to flag steps with too much change in nrg
         energy_before_step = energy(i, v)
         
         power_during_step = power(left_boundary["source strength"],
@@ -472,7 +509,7 @@ def simulate(v_IN, sim_params, params):
                     # moving too quickly
                     valid_step = False
                     # back up hotspot
-                    for hotspot in Hotspot.active:
+                    for hotspot in Hotspot.active_hs:
                         hotspot.delete_timestep()
 
                     dt = dt/2
@@ -518,14 +555,14 @@ if __name__ == '__main__':
                         help = 'distance between nodes [m]')
     parser.add_argument('--dt', default = 1e-5, type = float,
                         help = 'time step [s]')
-    parser.add_argument('--duration', default = 1, type = float,
+    parser.add_argument('--duration', type = float,
                         help = 'duration of simulation [s]')
     parser.add_argument('--frames', default = 10, type = int,
                         help = 'number of frames to output')
-    parser.add_argument('--Rload', default = 'match', 
-                        help = 'load impedance [Ω] or "match" to match impedance')
-    parser.add_argument('--Rin', default = 'match',
-                        help = 'output impedance of source [Ω] or "match" to match impedance')
+    parser.add_argument('--Rload', 
+                        help = 'load impedance [Ω].  If absent, impedence assumed to be matched')
+    parser.add_argument('--Rin', 
+                        help = 'output impedance of source [Ω]. If absent, assumed to be matched')
     parser.add_argument('--alpha', default = '0', type = float,
                         help = 'quadratic term in nonlinearity [A⁻²]')
     parser.add_argument('--beta', default = '0', type = float,
@@ -564,18 +601,34 @@ if __name__ == '__main__':
                         help = 'maximum fractional energy change per timestep')
     parser.add_argument('--fcut', default = 40e9, type = float,
                         help = 'maximum frequency in transmission line')
+    parser.add_argument('--width', default = 100.0e-9, type = float,
+                        help = 'width of nanowire [m]')
     
     args = parser.parse_args()
-    if args.Rin == 'match':
-        args.Rin = np.sqrt(args.mur/args.epsr)
-    if args.Rload == 'match':
-        args.Rload = np.sqrt(args.mur/args.epsr)
+
+    # set Rin and Rload to match if they weren't defined
+    if args.Rin == None:
+        args.Rin = np.sqrt(args.mur/args.epsr)*Zo
+        if args.verbose:
+            print("No Rin entered, using matched impedence condition")
+
+    if args.Rload == None:
+        if args.verbose:
+            print("No Rload entered, using matched impedence condition")
+        args.Rload = np.sqrt(args.mur/args.epsr)*Zo
+
+    transit_time = args.length / c * np.sqrt(args.mur*args.epsr)
+    # if duration not specified, simulate across one transit time
+    if args.duration == None:
+        if args.verbose:
+            print("No duration entered, assume transit time")
+        args.duration = transit_time
 
     # for parameters that are about the physical system primarily
     params = {"mu_r": args.mur,
               "eps_r": args.epsr,
-              "RIN": args.Rin,
-              "RL": args.Rload,
+              "RIN": args.Rin/Zo,
+              "RL": args.Rload/Zo,
               "alpha": args.alpha,
               "beta": args.beta,
               "ic": args.ic,
@@ -584,30 +637,31 @@ if __name__ == '__main__':
               "bias": args.bias,
               "length": 1., # always use length 1, and normalize
               # convert duration to sim units by * c/L
-              "duration": args.duration * c / args.length,
-              "Rsheet": args.Rsheet / Zo
+              "duration": args.duration / transit_time,
+              "Rsheet": args.Rsheet / Zo,
+              "width": args.width/args.length
     }
 
-    sourcelist = {'gaussian': gaussian(args.amplitude,
-                                       args.t_offset * c / args.length,
-                                       args.sigma * c / args.length,
-                                       args.offset),
-                  'step': step(args.amplitude,
-                               args.t_offset * c / args.length,
-                               args.sigma * c / args.length,
-                               args.offset),
-                  'sinusoid': sinusoid(args.amplitude,
-                                       args.t_offset * c / args.length,
-                                       1/(args.sigma * c / args.length),
-                                       args.offset)
+    sourcelist = {'gaussian': gaussian(args.amplitude/Zo,
+                                       args.t_offset / transit_time,
+                                       args.sigma / transit_time,
+                                       args.offset/Zo),
+                  'step': step(args.amplitude/Zo,
+                               args.t_offset / transit_time,
+                               args.sigma / transit_time,
+                               args.offset/Zo),
+                  'sinusoid': sinusoid(args.amplitude/Zo,
+                                       args.t_offset / transit_time,
+                                       1/(args.sigma / transit_time),
+                                       args.offset/Zo)
     }
 
     # for parameters that describe the source
     source_params = {"type": args.source,
-                     "amplitude": args.amplitude,
-                     "t_offset": args.t_offset,
-                     "sigma": args.sigma,
-                     "offset": args.offset}
+                     "amplitude": args.amplitude/Zo,
+                     "t_offset": args.t_offset / transit_time,
+                     "sigma": args.sigma / transit_time,
+                     "offset": args.offset/Zo}
     
     # for parameters that are about the numerics primarily
     sim_params = {"dx": args.dx/args.length,
@@ -625,6 +679,15 @@ if __name__ == '__main__':
     # sim_params["rho"] = 2*np.pi*params["mu_r"]*sim_params["fcut"]
     sim_params["rho"] = 0
 
+    if args.debug:
+        print(f"Time params:")
+        print(f"input dt: {args.dt}")
+        print(f'timescale (L/c): {transit_time}')
+        print(f'sim dt: {sim_params["dt"]}')
+        print(f'input duration: {args.duration}')
+        print(f'sim duration: {params["duration"]}')
+
+    
     if args.debug:
         print(params)
         print(sim_params)
@@ -646,7 +709,7 @@ if __name__ == '__main__':
 
         plt.subplot(2,1,2)
         for frame in frames_out:
-            plt.plot(xpoints,frame[2])
+            plt.plot(xpoints,np.array(frame[2])*Zo)
         plt.xlabel('pos')
         plt.ylabel('voltage')
         plt.ticklabel_format(axis='y',style='sci',scilimits=(-2,2))

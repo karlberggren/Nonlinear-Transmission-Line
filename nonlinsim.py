@@ -25,11 +25,12 @@ timestep.
 FIXME refactor out Vretrap and replace with a Rmin
 
 """
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from scipy.special import erf as erf
-from scipy import constants
+from scipy import constants,sparse,interpolate
 
 # These are physical constants... they're gonna be globals.
 
@@ -182,6 +183,7 @@ def funcsum(func1, func2):
 
     return v_IN
     
+#@profile
 def simulate(sim_params, params):
     """
     simulate for a giving input function and set of parameters
@@ -233,13 +235,6 @@ def simulate(sim_params, params):
 
     numpoints = int(length/dx)
 
-    """
-    i[0] refers to the current in the first inductor (from left to right), which is
-    immediately preceded by the input resistor, and followed by a capacitor to 
-    ground (v[0]).
-    """
-    v = [params["bias"]*params["ic"]*params["RL"] for _ in range(numpoints)]
-    i = [params["bias"]*params["ic"] for _ in range(numpoints)]
     icnormd = [1 for _ in range(numpoints)]
 
     # suppress ic in one node, set by control parameters, as if photon hit there.
@@ -385,6 +380,110 @@ def simulate(sim_params, params):
             
         return newi, newv
     
+    def make_lookup(func):
+        """
+        make_lookup::helper function to create a faster table lookup version
+        of a function with 1000 points
+        """
+        ivals = np.linspace(-params["ic"],params["ic"],1000)
+        yvals = func(ivals)
+        lookup_func = interpolate.interp1d(ivals, yvals)
+        return lookup_func
+
+    @make_lookup
+    def mu_eff(current):
+        """
+        current: current
+        
+        specify nonlinear dependence of mu on current.  
+        """
+        return params["mu_r"]*(1
+                               + 2*params["alpha"]*current**2
+                               + 4*params["beta"]*current**4)
+
+    def faster_timestep(i, v, left_boundary, right_boundary, dt):
+        """
+        move i,v vectors forward from time t to time t+dt, taking care of
+        boundary conditions.
+
+        update any hotspots
+
+        return updated i, v
+        """
+        # bring in state from outside
+        def next_current_vector(i, v, N, dt, dx, μ_func, ε, σ, VIN, RIN, RL):
+            μ_vals = μ_func(i)
+            i_i = sparse.identity(N, format="csr")
+            i_i = np.ones(N)
+            i_i[0] = 1 - RIN*dt/μ_vals[0]/dx
+            i_i = sparse.diags(i_i)
+            i_v1 = np.ones(N)*dt/μ_vals/dx
+            i_v1[0],i_v1[-1] = - i_v1[0],-i_v1[-1]
+            i_v2=-np.ones(N-1)*dt/μ_vals[1:]/dx  # careful about indexing
+            i_v2[-1]=-i_v2[-1]
+            i_v = sparse.diags([i_v1,i_v2],[0,-1], format = "csr")
+            inhomog = np.zeros(N)
+            inhomog[0] = VIN * dt / μ_vals[0] / dx
+            return i_i.dot(i) + i_v.dot(v) + inhomog
+
+        def next_voltage_vector(i, v, N, dt, dx, μ_func, ε, σ, VIN, RIN, RL):
+            v_v1 = np.full(N,1+ dt * σ / ε / dx**2)
+            v_v1[0] = 1
+            v_v1[-1] = v_v1[-1] - dt / ε / (RL+.01) / dx  # fixme kludge
+            v_v2 = np.full(N-1, dt * σ / ε / dx**2)
+            v_v = sparse.diags([v_v1,v_v2],[0,-1], format= "csr")
+            v_i1 = np.full(N,dt/ε/dx)
+            v_i2 = np.full(N-1,-dt/ε/dx)
+            v_i = sparse.diags([v_i1,v_i2], [0,1], format = "csr")
+            return v_i.dot(i) + v_v.dot(v)
+
+        RIN = left_boundary['source impedance'] 
+        RL = right_boundary['load impedance']
+        numpoints = int(params["length"]/sim_params["dx"])
+        dx = sim_params["dx"]
+        εr = params["eps_r"]
+        σ = params["conductivity"]
+        nexti = next_current_vector(i, v, numpoints, dt, dx, mu_eff, εr, σ, v_IN(t), RIN, RL)
+        nextv = next_voltage_vector(i, v, numpoints, dt, dx, mu_eff, εr, σ, v_IN(t), RIN, RL)
+
+        # check if a hotspot needs to be created
+        # fixme create icnormd
+
+        # hotspots is now an array with "True" wherever there's a hotspot
+        #hotspots = nexti > params["ic"]*icnormd
+        hotspots = np.full(numpoints,False)
+        for n in np.argwhere(hotspots):
+            if verbose:
+                print(f"Hotspot detected at n = {n}, newi is {nexti[n]:.3}")
+                raise Exception()  #fixme, breaks hotspots
+                pass
+    
+            # switching current exceeded
+            if n not in Hotspot.active_hotspot_indices():
+                # hotspot didn't exist at this location previously, create it
+                Hotspot(t, n, params, sim_params)
+            else:
+                # check if there's a hotspot here already
+                hotspot = Hotspot.get_hotspot(n)
+                if hotspot:
+                    Rhs = hotspot.res
+                    """
+                    
+                        v(n-1)       v(n)
+                    . . . o--L---Rhs--o
+                      ->        |
+                      in        C
+                                |
+                                g
+                    
+                    """
+                    dv = v[n-1] - (v[n] +  i[n] * Rhs)  # voltage across inductor
+                    di = i[n] - i[n+1]  # current in capacitor
+                    nexti[n] = dt/mu_eff(i[n])/dx*dv + i[n]  # might be very slow b/c i[n] not array
+                    nextv[n] = dt/dx/eps*di + v[n]
+                    hotspot.step(i[n],dt) == 0
+
+        return nexti, nextv
 
     def old_energy(i,v) :
         """
@@ -466,8 +565,11 @@ def simulate(sim_params, params):
     """
     Central simulation loop
     """
+    v = np.full(numpoints,params["bias"]*params["ic"]*params["RL"])
+    i = np.full(numpoints,params["bias"]*params["ic"])
+    #comment for fast
+    i,v=list(i),list(v)
     while t < duration:
-        # print(t)
         left_boundary["source strength"] = v_IN(t)
         valid_step = False  # used to flag steps with too much change in nrg
         energy_before_step = energy(i, v)
@@ -481,12 +583,23 @@ def simulate(sim_params, params):
                 pass
             
             # Where simulation occurs
+            """
+            i[0] refers to the current in the first inductor (from left to right), which is
+            immediately preceded by the input resistor, and followed by a capacitor to 
+            ground (v[0]).
+            """
             temp_i,temp_v  = timestep(i,
                                       v,
                                       left_boundary,
                                       right_boundary,
                                       dt)
-
+            """
+            temp_i,temp_v  = faster_timestep(i,
+                                             v,
+                                             left_boundary,
+                                             right_boundary,
+                                             dt)
+            """
             energy_after_step = energy(temp_i, temp_v)
 
             step_nrg_gain = power_during_step*dt + \
@@ -601,17 +714,20 @@ parser.add_argument('--fcut', default = 40e9, type = float,
 parser.add_argument('--width', default = 100.0e-9, type = float,
                     help = 'width of nanowire [m]')
 
-try:
-    args = parser.parse_args(sys.argv)
-    print(args)
-except NameError:
-    print("Using hard-coded parameters")
-    args_list = []
-    args_list.extend("--length 1 --mur 1 --epsr 1 --dx 1e-2 --dt 1e-12 --duration 3e-9 --frames 10 --alpha 0.0".split())
-    args_list.extend("--beta 0.0 --source step --amplitude .001 --t_offset 6e-9 --sigma 1e-9 --offset 0.0 --ic 1.2e-3 ".split())
-    args_list.extend("--ihs 0.4e-3 --bias 0 --Rsheet 400 -p".split())
-    args = parser.parse_args(args_list)
-    print(args)
+def text_to_args(arg_str):
+    """take raw text and convert it to a list of args for parsing as if on command line"""
+    args = parser.parse_args(arg_str.split())
+    return args
+    
+# if no arguments provided on command line, use hard-coded params
+if len(sys.argv) > 1:
+    args = parser.parse_args()
+else:
+    args = text_to_args("""
+--length 1 --mur 10 --epsr 1 --dx 1e-2 --dt 1e-13 --frames 10 --alpha 0.0
+--beta 0.0 --source step --amplitude .001 --t_offset 5e-9 --sigma 1e-9 --offset 0.0 --ic 1.2e-3
+--ihs 0.4e-3 --bias 0 --Rsheet 400 --duration 2e-9""")
+
     
 def cla_to_dicts(args):
     """
@@ -633,7 +749,7 @@ def cla_to_dicts(args):
     # if duration not specified, simulate across one transit time
     if args.duration == None:
         if args.verbose:
-            print("No duration entered, assume transit time")
+            print(f"No duration entered, assume transit time {transit_time}")
         args.duration = transit_time
 
     # for parameters that are about the physical system primarily
@@ -690,7 +806,8 @@ def cla_to_dicts(args):
 
     # sim_params["rho"] = 2*np.pi*params["mu_r"]*sim_params["fcut"]
     sim_params["rho"] = 0
-
+    params["conductivity"]=0
+    
     if args.debug:
         print(f"Time params:")
         print(f"input dt: {args.dt}")
@@ -706,48 +823,51 @@ def cla_to_dicts(args):
 
     params["source"] = sourcelist[args.source]
 
-    return params, sim_params
+    return params, sim_params, source_params
 
-params,sim_params = cla_to_dicts(args)
+params,sim_params,source_params = cla_to_dicts(args)
+
+def plot_frames(frames_out, sim_params = sim_params, params = params):
+    xpoints = [n*args.dx for n in range(int(params["length"]/sim_params["dx"]))]
+    plt.subplot(2,1,1)
+    for frame in frames_out:
+        label = f"{frame[0]:.2}"
+        temp = plt.plot(xpoints,frame[1],label=label)
+    plt.ylabel('current')
+    plt.ticklabel_format(axis='y',style='sci',scilimits=(-2,2))
+    plt.legend()
+
+    plt.subplot(2,1,2)
+    for frame in frames_out:
+        plt.plot(xpoints,np.array(frame[2])*Zo)
+    plt.xlabel('pos')
+    plt.ylabel('voltage')
+    plt.ticklabel_format(axis='y',style='sci',scilimits=(-2,2))
+    plt.show()
+
+def plot_detailed_balance(detailed_balance):
+    plt.plot([x[0] for x in detailed_balance], [x[1] for x in detailed_balance])
+    plt.xlabel('time')
+    plt.ylabel('energy')
+    plt.show()
+
+def save_frames(filename, params = params, sim_params = sim_params, source_params = source_params):
+    with open(filename, 'w') as f:
+        f.write(str(params))
+        f.write(str(sim_params))
+        f.write(str(source_params))
+        # currently the output is not very well enumerated, so you need to use dx, dt,
+        # and numframes from preamble to figure out position and time...
+        f.write(str(frames_out))
+        f.close()
 
 if __name__=='__main__':
     frames_out,detailed_balance  = simulate(sim_params = sim_params,
                                             params = params)
-
+        
     if args.plot :
-        xpoints = [n*args.dx for n in range(int(args.length/args.dx))]
-        plt.subplot(2,1,1)
-        for frame in frames_out:
-            label = f"{frame[0]:.2}"
-            temp = plt.plot(xpoints,frame[1],label=label)
-        plt.ylabel('current')
-        plt.ticklabel_format(axis='y',style='sci',scilimits=(-2,2))
-        plt.legend()
-
-        plt.subplot(2,1,2)
-        for frame in frames_out:
-            plt.plot(xpoints,np.array(frame[2])*Zo)
-        plt.xlabel('pos')
-        plt.ylabel('voltage')
-        plt.ticklabel_format(axis='y',style='sci',scilimits=(-2,2))
-        plt.show()
-
-        plt.plot([x[0] for x in detailed_balance], [x[1] for x in detailed_balance])
-        plt.xlabel('time')
-        plt.ylabel('energy')
-        plt.show()
-
-    if args.debug :
-        #print(frames_out)
-        pass
-
+        plot_frames(frames_out)
+        plot_detailed_balance(detailed_balance)
+        
     if args.filename:
-        with open(args.filename, 'w') as f:
-            f.write(str(params))
-            f.write(str(sim_params))
-            f.write(str(source_params))
-            # currently the output is not very well enumerated, so you need to use dx, dt,
-            # and numframes from preamble to figure out position and time...
-            f.write(str(frames_out))
-            f.close()
-
+        save_frames(args.filename)

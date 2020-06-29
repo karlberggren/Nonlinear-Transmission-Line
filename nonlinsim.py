@@ -25,7 +25,6 @@ timestep.
 FIXME refactor out Vretrap and replace with a Rmin
 
 """
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -183,24 +182,23 @@ def funcsum(func1, func2):
 
     return v_IN
     
-"""
-simulate
+def simulate(sim_params, params):
+    """
+    simulate for a giving input function and set of parameters
 
-:: v_IN :: main input function of time
-:: sim_params :: dict of simulation relevant parameters
-:: params :: dict of physically relevant parameters
+    sim_params :: dict of simulation relevant parameters
+    params :: dict of physically relevant parameters
 
-perform simulation over duration etc. as specified in parameter dictionaries
-
-"""
-def simulate(v_IN, sim_params, params):
+    perform simulation over duration etc. as specified in parameter dictionaries
+    """ 
     length = params["length"]
     duration = params["duration"]
 
     dx = sim_params["dx"]
     dt = sim_params["dt"]
     numframes = sim_params["numframes"]
-
+    v_IN = params["source"]
+    
     def mu(current):
         """
         current: current
@@ -539,73 +537,87 @@ def simulate(v_IN, sim_params, params):
 
     return frames, detailed_balance
 
-if __name__ == '__main__':
-    import argparse
+import argparse
 
-    parser = argparse.ArgumentParser(description =
-                                     'Simulate transmission line with nonlinear inductance.')
-    parser.add_argument('-f','--filename', help = 'output file name for data dump')  # not implemented FIXME
-    parser.add_argument('--mur', default = 1, type = float,
-                        help='relative magnetic permeability at zero current')
-    parser.add_argument('--epsr', default = 1, type = float,
-                        help = 'relative dielectric permeability')
-    parser.add_argument('--length', default = 1, type = float,
-                        help = 'length of transmission line [m]')
-    parser.add_argument('--dx', default = 1e-2, type = float,
-                        help = 'distance between nodes [m]')
-    parser.add_argument('--dt', default = 1e-5, type = float,
-                        help = 'time step [s]')
-    parser.add_argument('--duration', type = float,
-                        help = 'duration of simulation [s]')
-    parser.add_argument('--frames', default = 10, type = int,
-                        help = 'number of frames to output')
-    parser.add_argument('--Rload', 
-                        help = 'load impedance [Ω].  If absent, impedence assumed to be matched')
-    parser.add_argument('--Rin', 
-                        help = 'output impedance of source [Ω]. If absent, assumed to be matched')
-    parser.add_argument('--alpha', default = '0', type = float,
-                        help = 'quadratic term in nonlinearity [A⁻²]')
-    parser.add_argument('--beta', default = '0', type = float,
-                        help = 'quartic term in nonlinearity [A⁻⁴]')
-    parser.add_argument('--source', default = 'gaussian',
-                        help = 'source type: gaussian, sinusoid, or step')
-    parser.add_argument('--amplitude', default = .001, type = float,
-                        help = 'amplitude of source [A]')
-    parser.add_argument('--t_offset', default = 1.0, type = float,
-                        help = 'time offset from zero of source [s]')
-    parser.add_argument('--sigma', default = 0.4, type = float,
-                        help = 'standard deviation of gaussian, or period of sinusoidal source [s]')
-    parser.add_argument('--offset', default = 0.0, type = float,
-                        help = 'DC offset value of source')
-    parser.add_argument('-p', '--plot', action = 'store_true',
-                        help = 'show plot of output')
-    parser.add_argument('-v', '--verbose', action = 'store_true',
-                        help = 'verbose output, useful for tracking simulation')
-    parser.add_argument('-d', '--debug', action = 'store_true',
-                        help = 'debugging mode, for development')
-    parser.add_argument('--ic', default = 1, type = float,
-                        help = 'switching current of wire')
-    parser.add_argument('--ihs', default = .3, type = float,
-                        help = 'retrapping current of wire')
-    parser.add_argument('--Rsheet', default = 1, type = float,
-                        help = 'sheet resistance of film')
-    parser.add_argument('--hsloc', default = 1.5, type = float,
-                        help = 'constriction location as fraction of length.  If > 1 or < 0, no constriction exists.')
-    parser.add_argument('--bias', default = 0, type = float,
-                        help = 'initial DC bias current as fraction of ic')
-    parser.add_argument('--adaptt', action = 'store_true',
-                        help = 'adaptive timestep mode')
-    parser.add_argument('--nrgmin', default = 1e-9, type = float,
-                        help = 'minimum fractional energy change per timestep')
-    parser.add_argument('--nrgmax', default = 1e-9, type = float,
-                        help = 'maximum fractional energy change per timestep')
-    parser.add_argument('--fcut', default = 40e9, type = float,
-                        help = 'maximum frequency in transmission line')
-    parser.add_argument('--width', default = 100.0e-9, type = float,
-                        help = 'width of nanowire [m]')
+parser = argparse.ArgumentParser(description =
+                                 'Simulate transmission line with nonlinear inductance.')
+parser.add_argument('-f','--filename', help = 'output file name for data dump')  # not implemented FIXME
+parser.add_argument('--mur', default = 1, type = float,
+                    help='relative magnetic permeability at zero current')
+parser.add_argument('--epsr', default = 1, type = float,
+                    help = 'relative dielectric permeability')
+parser.add_argument('--length', default = 1, type = float,
+                    help = 'length of transmission line [m]')
+parser.add_argument('--dx', default = 1e-2, type = float,
+                    help = 'distance between nodes [m]')
+parser.add_argument('--dt', default = 1e-5, type = float,
+                    help = 'time step [s]')
+parser.add_argument('--duration', type = float,
+                    help = 'duration of simulation [s]')
+parser.add_argument('--frames', default = 10, type = int,
+                    help = 'number of frames to output')
+parser.add_argument('--Rload', 
+                    help = 'load impedance [Ω].  If absent, impedence assumed to be matched')
+parser.add_argument('--Rin', 
+                    help = 'output impedance of source [Ω]. If absent, assumed to be matched')
+parser.add_argument('--alpha', default = '0', type = float,
+                    help = 'quadratic term in nonlinearity [A⁻²]')
+parser.add_argument('--beta', default = '0', type = float,
+                    help = 'quartic term in nonlinearity [A⁻⁴]')
+parser.add_argument('--source', default = 'gaussian',
+                    help = 'source type: gaussian, sinusoid, or step')
+parser.add_argument('--amplitude', default = .001, type = float,
+                    help = 'amplitude of source [A]')
+parser.add_argument('--t_offset', default = 1.0, type = float,
+                    help = 'time offset from zero of source [s]')
+parser.add_argument('--sigma', default = 0.4, type = float,
+                    help = 'standard deviation of gaussian, or period of sinusoidal source [s]')
+parser.add_argument('--offset', default = 0.0, type = float,
+                    help = 'DC offset value of source')
+parser.add_argument('-p', '--plot', action = 'store_true',
+                    help = 'show plot of output')
+parser.add_argument('-v', '--verbose', action = 'store_true',
+                    help = 'verbose output, useful for tracking simulation')
+parser.add_argument('-d', '--debug', action = 'store_true',
+                    help = 'debugging mode, for development')
+parser.add_argument('--ic', default = 1, type = float,
+                    help = 'switching current of wire')
+parser.add_argument('--ihs', default = .3, type = float,
+                    help = 'retrapping current of wire')
+parser.add_argument('--Rsheet', default = 1, type = float,
+                    help = 'sheet resistance of film')
+parser.add_argument('--hsloc', default = 1.5, type = float,
+                    help = 'constriction location as fraction of length.  If > 1 or < 0, no constriction exists.')
+parser.add_argument('--bias', default = 0, type = float,
+                    help = 'initial DC bias current as fraction of ic')
+parser.add_argument('--adaptt', action = 'store_true',
+                    help = 'adaptive timestep mode')
+parser.add_argument('--nrgmin', default = 1e-9, type = float,
+                    help = 'minimum fractional energy change per timestep')
+parser.add_argument('--nrgmax', default = 1e-9, type = float,
+                    help = 'maximum fractional energy change per timestep')
+parser.add_argument('--fcut', default = 40e9, type = float,
+                    help = 'maximum frequency in transmission line')
+parser.add_argument('--width', default = 100.0e-9, type = float,
+                    help = 'width of nanowire [m]')
+
+try:
+    args = parser.parse_args(sys.argv)
+    print(args)
+except NameError:
+    print("Using hard-coded parameters")
+    args_list = []
+    args_list.extend("--length 1 --mur 1 --epsr 1 --dx 1e-2 --dt 1e-12 --duration 3e-9 --frames 10 --alpha 0.0".split())
+    args_list.extend("--beta 0.0 --source step --amplitude .001 --t_offset 6e-9 --sigma 1e-9 --offset 0.0 --ic 1.2e-3 ".split())
+    args_list.extend("--ihs 0.4e-3 --bias 0 --Rsheet 400 -p".split())
+    args = parser.parse_args(args_list)
+    print(args)
     
-    args = parser.parse_args()
-
+def cla_to_dicts(args):
+    """
+    cla_to_dicts::convert human-comfortable version of inputs to units and format
+    that the simulator uses
+    """
     # set Rin and Rload to match if they weren't defined
     if args.Rin == None:
         args.Rin = np.sqrt(args.mur/args.epsr)*Zo
@@ -692,11 +704,16 @@ if __name__ == '__main__':
         print(params)
         print(sim_params)
 
+    params["source"] = sourcelist[args.source]
 
-    frames_out,detailed_balance  = simulate(sourcelist[args.source],
-                                            sim_params = sim_params,
+    return params, sim_params
+
+params,sim_params = cla_to_dicts(args)
+
+if __name__=='__main__':
+    frames_out,detailed_balance  = simulate(sim_params = sim_params,
                                             params = params)
-    
+
     if args.plot :
         xpoints = [n*args.dx for n in range(int(args.length/args.dx))]
         plt.subplot(2,1,1)
@@ -733,3 +750,4 @@ if __name__ == '__main__':
             # and numframes from preamble to figure out position and time...
             f.write(str(frames_out))
             f.close()
+

@@ -1,0 +1,19 @@
+mu_r,100.0
+eps_r,1.0
+RIN,10.0
+RL,10.0
+alpha,40000.0
+beta,400000000.0
+ic,0.0012
+ihs,0.3
+hotspot_location,1.5
+bias,0
+length,0.01
+duration,0.449688687
+Rsheet,0.0026544187279930135
+width,9.999999999999999e-06
+conductivity,0
+source,<function gaussian.<locals>.v_IN at 0x2940A340>
+dx,0.001
+dt,2.9979245800000002e-05
+numframes,10

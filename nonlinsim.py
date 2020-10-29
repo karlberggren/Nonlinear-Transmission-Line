@@ -770,6 +770,8 @@ parser.add_argument('--sigma', default = 0.4, type = float,
                     help = 'standard deviation of gaussian, or period of sinusoidal source [s]')
 parser.add_argument('--offset', default = 0.0, type = float,
                     help = 'DC offset value of source')
+parser.add_argument('--freq', default = 0.0, type = float,
+                    help = 'frequency in Hz')
 parser.add_argument('-p', '--plot', action = 'store_true',
                     help = 'show plot of output')
 parser.add_argument('-v', '--verbose', action = 'store_true',
@@ -854,8 +856,8 @@ def cla_to_dicts(args):
                                args.sigma*c,
                                args.offset/Zo),
                   'sinusoid': sinusoid(args.amplitude/Zo,
+                                       args.freq/c,
                                        args.t_offset*c,
-                                       1/(args.sigma*c),
                                        args.offset/Zo)
     }
 

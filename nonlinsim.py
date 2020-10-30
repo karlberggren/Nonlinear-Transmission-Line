@@ -392,7 +392,10 @@ def simulate(sim_params, params):
                 iR = - dv / (sim_params["rho"]*dx)
             else:
                 iR = 0
-            di = i[-1] + iR - v[-1]/(Rload + .01)
+            if Rload == 0:
+                di = i[-1] + iR - v[-1]/(Rload + .01)
+            else:
+                di = i[-1] + iR - v[-1]/(Rload)
             newv.append(v[-1] + di * dt / eps / dx)
             newi.append(dv * dt / mus / dx + i[-1])
             
@@ -458,7 +461,11 @@ def simulate(sim_params, params):
             v_v1 = np.full(N,1+ dt * σ / ε / dx**2)
             v_v1[0] = 1
             # in derived matrix, should be - Rl term, but + term seems to help
-            v_v1[-1] =( v_v1[-1] - dt / ε / (RL+.01) / dx)  # fixme kludge
+            if RL == 0:
+                v_v1[-1] =( v_v1[-1] - dt / ε / (RL+.01) / dx)  # fixme kludge
+            else:
+                v_v1[-1] =( v_v1[-1] - dt / ε / (RL) / dx)  # fixme kludge
+             
             
             v_v2 = np.full(N-1, dt * σ / ε / dx**2)
             v_v = sparse.diags([v_v1,v_v2],[0,-1], format= "csr")
@@ -553,7 +560,11 @@ def simulate(sim_params, params):
             v_v1 = np.full(N,1+ dt * σ / ε / dx**2)
             v_v1[0] = 1
             # in derived matrix, should be - Rl term, but + term seems to help
-            v_v1[-1] =( v_v1[-1] - dt / ε / (RL+.01) / dx)  # fixme kludge
+            if RL==0:
+                v_v1[-1] =( v_v1[-1] - dt / ε / (RL+.01) / dx)  # fixme kludge
+            else:
+                v_v1[-1] =( v_v1[-1] - dt / ε / RL / dx)  # fixme kludge
+                
             
             v_v2 = np.full(N-1, dt * σ / ε / dx**2)
             v_v = sparse.diags([v_v1,v_v2],[0,-1], format= "csr")
@@ -673,6 +684,7 @@ def simulate(sim_params, params):
     """
     Central simulation loop
     """
+    # Setting up initial state of the waveguide.
     v = np.full(numpoints,params["bias"]*params["ic"]*params["RL"])
     i = np.full(numpoints,params["bias"]*params["ic"])
 
@@ -915,6 +927,9 @@ def cla_to_dicts(args):
     return params, sim_params, source_params
 
 def plot_frames(frames_out, params, sim_params):
+    """
+    plot_frames: top/bottom i-v plots
+    """
     dx = sim_params["dx"]
     xpoints = [dx*n for n in range(int(params["length"]/dx))]
     plt.subplot(2,1,1)
